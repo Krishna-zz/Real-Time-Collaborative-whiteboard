@@ -5,6 +5,7 @@ function App() {
 
   return (
     <>
+     <h1>🖊️ Collaborative Whiteboard (TS)</h1>
      <Whiteboard/>
     </>
   )
