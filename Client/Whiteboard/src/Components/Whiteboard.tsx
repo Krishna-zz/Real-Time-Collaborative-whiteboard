@@ -66,11 +66,41 @@ const Whiteboard: React.FC = () => {
           setPrevPos({x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY})
      }
 
-     
+     const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+          if(!isDrawing || !prevPos) return;
+          const newX = e.nativeEvent.offsetX
+          const newY = e.nativeEvent.offsetY
+          drawLine(prevPos.x, prevPos.y, newX, newY, color ,true)
+          setPrevPos({x:newX, y:newY})
+     }
 
+     const handleMouseUp = () => {
+          setIsDrawing(false)
+          setPrevPos(null)
+     }
 
   return (
-    <div className="bg-amber-500">Whiteboard</div>
+     <div>
+          <div style={{marginBottom : "10px"}}>
+               <input
+                type="color" 
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+               />
+          </div>
+          <canvas
+               ref={canvasRef}
+               onMouseDown={handleMouseDown}
+               onMouseMove={handleMouseMove}
+               onMouseUp={handleMouseUp}
+               onMouseLeave={handleMouseUp}
+               style={{
+                    border: "1px solid #ccc",
+                    background: "#fff",
+                    cursor: "crosshair",
+               }}
+          />
+     </div>
   )
 }
 
