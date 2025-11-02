@@ -1,107 +1,217 @@
-import React , { useEffect,useRef, useState } from "react"
-
-import { io, Socket } from "socket.io-client" 
-
-interface DrawData {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-  color: string;
-}
-
-const socket: Socket = io("http://localhost:3001")
+import React, { useEffect, useRef, useState } from "react";
+import  fabric  from "fabric";
 
 const Whiteboard: React.FC = () => {
+  const canvasRef = useRef<fabric.Canvas | null>(null);
+  const canvasEl = useRef<HTMLCanvasElement | null>(null);
 
-   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-   const ctxRef = useRef<CanvasRenderingContext2D | null>(null)
-   const [isDrawing, setIsDrawing] = useState(false)
-   const [color , setColor] = useState("#000000")
-   const [prevPos, setPrevPos] = useState<{x: number; y:number} | null>(null)
+  const [currentMode, setCurrentMode] = useState<string>("select");
+  const [drawingColor, setDrawingColor] = useState<string>("#000000");
+  const [lineWidth, setLineWidth] = useState<number>(2);
 
+  const startX = useRef<number>(0);
+  const startY = useRef<number>(0);
+  const tempShape = useRef<fabric.Object | null>(null);
 
-     useEffect(() => {
-          const canvas = canvasRef.current!
-          canvas.width = window.innerWidth * 0.8
-          canvas.height = window.innerHeight * 0.8
-          const ctx = canvas.getContext("2d")!
-          ctx.lineCap = 'round'
-          ctx.lineWidth = 3
-          ctxRef.current = ctx
+  // Initialize Canvas
+  useEffect(() => {
+    if (!canvasEl.current) return;
 
-          socket.on("drawing", (data: DrawData) => {
-               drawLine(data.x0, data.y0, data.x1, data.y1, data.color, false)
-          })
+    const canvas = new fabric.Canvas(canvasEl.current, {
+      isDrawingMode: false,
+      backgroundColor: "white",
+    });
+    canvasRef.current = canvas;
 
-          return() => {
-               socket.off("drawing")
-          }
-     },[])
+    const resizeCanvas = () => {
+      canvas.setHeight(window.innerHeight - 60);
+      canvas.setWidth(window.innerWidth);
+      canvas.renderAll();
+    };
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
 
-     const drawLine = (
-           x0: number,
-           y0: number,
-           x1: number,
-           y1: number,
-           strokeColor: string,
-           emit: boolean
-     ) => {
-          const ctx = ctxRef.current
-          if(!ctx) return
-          ctx.strokeStyle = strokeColor
-          ctx.beginPath()
-          ctx.moveTo(x0,y0)
-          ctx.lineTo(x1, y1)
-          ctx.stroke()
-          ctx.closePath()
+    return () => {
+      window.removeEventListener("resize", resizeCanvas);
+      canvas.dispose();
+    };
+  }, []);
 
-          if (emit) {
-               socket.emit("drawing", {x0, y0, x1, y1, color:strokeColor})
-          }
-     }
+  // Drawing tools logic
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-     const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-          setIsDrawing(true)
-          setPrevPos({x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY})
-     }
+    const handleMouseDown = (opt: any) => {
+      if (!canvas) return;
+      const pointer = canvas.getPointer(opt.e);
 
-     const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-          if(!isDrawing || !prevPos) return;
-          const newX = e.nativeEvent.offsetX
-          const newY = e.nativeEvent.offsetY
-          drawLine(prevPos.x, prevPos.y, newX, newY, color ,true)
-          setPrevPos({x:newX, y:newY})
-     }
+      if (currentMode === "rect" || currentMode === "circle") {
+        startX.current = pointer.x;
+        startY.current = pointer.y;
 
-     const handleMouseUp = () => {
-          setIsDrawing(false)
-          setPrevPos(null)
-     }
+        if (currentMode === "rect") {
+          tempShape.current = new fabric.Rect({
+            left: startX.current,
+            top: startY.current,
+            width: 0,
+            height: 0,
+            fill: "transparent",
+            stroke: drawingColor,
+            strokeWidth: lineWidth,
+          });
+        } else {
+          tempShape.current = new fabric.Circle({
+            left: startX.current,
+            top: startY.current,
+            radius: 0,
+            fill: "transparent",
+            stroke: drawingColor,
+            strokeWidth: lineWidth,
+          });
+        }
+        canvas.add(tempShape.current);
+      }
+    };
+
+    const handleMouseMove = (opt: any) => {
+      if (!canvas || !tempShape.current) return;
+      const pointer = canvas.getPointer(opt.e);
+
+      if (currentMode === "rect") {
+        const width = Math.abs(pointer.x - startX.current);
+        const height = Math.abs(pointer.y - startY.current);
+        tempShape.current.set({
+          left: Math.min(pointer.x, startX.current),
+          top: Math.min(pointer.y, startY.current),
+          width,
+          height,
+        });
+      } else if (currentMode === "circle") {
+        const radius =
+          Math.sqrt(
+            Math.pow(pointer.x - startX.current, 2) +
+              Math.pow(pointer.y - startY.current, 2)
+          ) / 2;
+        tempShape.current.set({ radius });
+      }
+      canvas.renderAll();
+    };
+
+    const handleMouseUp = () => {
+      tempShape.current = null;
+    };
+
+    canvas.on("mouse:down", handleMouseDown);
+    canvas.on("mouse:move", handleMouseMove);
+    canvas.on("mouse:up", handleMouseUp);
+
+    return () => {
+      canvas.off("mouse:down", handleMouseDown);
+      canvas.off("mouse:move", handleMouseMove);
+      canvas.off("mouse:up", handleMouseUp);
+    };
+  }, [currentMode, drawingColor, lineWidth]);
+
+  // Tool actions
+  const handleSelect = () => {
+    setCurrentMode("select");
+    canvasRef.current!.isDrawingMode = false;
+  };
+
+  const handleDraw = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    setCurrentMode("draw");
+    canvas.isDrawingMode = true;
+    if (!canvas.freeDrawingBrush) {
+      canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+    }
+    canvas.freeDrawingBrush.color = drawingColor;
+    canvas.freeDrawingBrush.width = lineWidth;
+  };
+
+  const handleAddText = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    setCurrentMode("text");
+    canvas.isDrawingMode = false;
+    const text = new fabric.IText("Type here", {
+      left: 100,
+      top: 100,
+      fill: drawingColor,
+      fontSize: 22,
+    });
+    canvas.add(text);
+    canvas.setActiveObject(text);
+  };
+
+  const handleClear = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.clear();
+    canvas.backgroundColor = "white";
+  };
+
+  const handleSave = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dataURL = canvas.toDataURL({ format: "png", quality: 1, multiplier: 1 });
+    const link = document.createElement("a");
+    link.href = dataURL;
+    link.download = "whiteboard.png";
+    link.click();
+  };
 
   return (
-     <div>
-          <div style={{marginBottom : "10px"}}>
-               <input
-                type="color" 
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-               />
-          </div>
-          <canvas
-               ref={canvasRef}
-               onMouseDown={handleMouseDown}
-               onMouseMove={handleMouseMove}
-               onMouseUp={handleMouseUp}
-               onMouseLeave={handleMouseUp}
-               style={{
-                    border: "1px solid #ccc",
-                    background: "#fff",
-                    cursor: "crosshair",
-               }}
-          />
-     </div>
-  )
-}
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      {/* Toolbar */}
+      <div
+        style={{
+          display: "flex",
+          gap: "10px",
+          padding: "10px",
+          background: "#fff",
+          borderBottom: "1px solid #ccc",
+          alignItems: "center",
+        }}
+      >
+        <button onClick={handleSelect}>🖱️ Select</button>
+        <button onClick={handleDraw}>✏️ Draw</button>
+        <button onClick={() => setCurrentMode("rect")}>⬛ Rect</button>
+        <button onClick={() => setCurrentMode("circle")}>⚪ Circle</button>
+        <button onClick={handleAddText}>🅰️ Text</button>
 
-export default Whiteboard
+        <label>
+          Color:
+          <input
+            type="color"
+            value={drawingColor}
+            onChange={(e) => setDrawingColor(e.target.value)}
+          />
+        </label>
+
+        <label>
+          Stroke:
+          <select
+            value={lineWidth}
+            onChange={(e) => setLineWidth(Number(e.target.value))}
+          >
+            <option>2</option>
+            <option>4</option>
+            <option>6</option>
+            <option>8</option>
+          </select>
+        </label>
+
+        <button onClick={handleClear}>🗑️ Clear</button>
+        <button onClick={handleSave}>💾 Export</button>
+      </div>
+
+      {/* Canvas */}
+      <canvas ref={canvasEl} />
+    </div>
+  );
+};
+
+export default Whiteboard;
