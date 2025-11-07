@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.17",
+    "lucide-react": "^0.552.0",
+    "tailwindcss": "^4.1.17"
+  },
+  "devDependencies": {
+    "@types/fabric": "^5.3.10"
+  }
+}
