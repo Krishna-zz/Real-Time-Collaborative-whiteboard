@@ -144,7 +144,7 @@ const WhiteboardWithShapes: React.FC = () => {
         </button>
       </div>
 
-      <div className="shadow-2xl bg-black rounded-xl">
+      <div className="shadow-2xl hover:shadow-blue-400 bg-black rounded-xl">
         <canvas ref={canvasRef} width={800} height={500} />
       </div>
     </div>
