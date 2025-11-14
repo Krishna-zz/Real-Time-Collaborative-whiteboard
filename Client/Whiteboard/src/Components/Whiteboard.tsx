@@ -1,5 +1,9 @@
+// client/src/WhiteboardWithShapes.tsx
 import React, { useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
 import * as fabric from "fabric";
+
+const socket = io("http://localhost:5000"); // your backend address
 
 const WhiteboardWithShapes: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -10,7 +14,6 @@ const WhiteboardWithShapes: React.FC = () => {
   useEffect(() => {
     if (!canvasRef.current) return;
 
-    // Create the canvas once
     const canvas = new fabric.Canvas(canvasRef.current, {
       backgroundColor: "black",
       isDrawingMode: true,
@@ -26,9 +29,15 @@ const WhiteboardWithShapes: React.FC = () => {
     let isDrawing = false;
     let shape: fabric.Rect | fabric.Circle | null = null;
 
-    // --- Handlers ---
+    // --- Socket: Listen for remote updates ---
+    socket.on("canvas:update", (data: string) => {
+      if (!fabricCanvas.current) return;
+      fabricCanvas.current.loadFromJSON(data, fabricCanvas.current.renderAll.bind(fabricCanvas.current));
+    });
+
+    // --- Local drawing logic ---
     const onMouseDown = (event: fabric.TPointerEventInfo) => {
-      const currentMode = modeRef.current; // ✅ always latest mode
+      const currentMode = modeRef.current;
       const pointer = canvas.getPointer(event.e);
 
       if (currentMode === "rect") {
@@ -72,6 +81,7 @@ const WhiteboardWithShapes: React.FC = () => {
     const onMouseMove = (event: fabric.TPointerEventInfo) => {
       if (!isDrawing || !shape) return;
       const pointer = canvas.getPointer(event.e);
+
       if (shape instanceof fabric.Rect) {
         shape.set({
           width: pointer.x - (shape.left ?? 0),
@@ -90,61 +100,63 @@ const WhiteboardWithShapes: React.FC = () => {
     const onMouseUp = () => {
       isDrawing = false;
       shape = null;
+
+      // 🔥 Send current canvas state to all
+      const json = JSON.stringify(canvas.toJSON());
+      socket.emit("canvas:update", json);
     };
 
-    // Attach once
+    const onObjectModified = () => {
+      const json = JSON.stringify(canvas.toJSON());
+      socket.emit("canvas:update", json);
+    };
+
+    // --- Delete key feature ---
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const activeObj = canvas.getActiveObject();
+        if (activeObj) {
+          canvas.remove(activeObj);
+          socket.emit("canvas:update", JSON.stringify(canvas.toJSON()));
+        }
+      }
+    };
+
+    // Attach
     canvas.on("mouse:down", onMouseDown);
     canvas.on("mouse:move", onMouseMove);
     canvas.on("mouse:up", onMouseUp);
+    canvas.on("object:modified", onObjectModified);
+    window.addEventListener("keydown", handleKeyDown);
 
     return () => {
+      socket.off("canvas:update");
       canvas.dispose();
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
 
-  // --- Update mode dynamically ---
+  // --- Mode update ---
   useEffect(() => {
-    modeRef.current = mode; // ✅ keep latest mode in ref
+    modeRef.current = mode;
     const canvas = fabricCanvas.current;
     if (!canvas) return;
-
     canvas.isDrawingMode = mode === "draw";
     canvas.selection = mode === "select";
   }, [mode]);
 
-  // --- UI ---
   const setDrawingMode = (newMode: typeof mode) => setMode(newMode);
 
   return (
     <div className="bg-gradient-to-b from-black via-[#020617] to-[#0f172a] min-h-screen flex flex-col items-center justify-center">
       <div className="mb-4">
-        <button
-          className="bg-blue-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
-          onClick={() => setDrawingMode("draw")}
-        >
-          ✏️ Draw
-        </button>
-        <button
-          className="bg-green-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
-          onClick={() => setDrawingMode("rect")}
-        >
-          ⬛ Rectangle
-        </button>
-        <button
-          className="bg-red-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
-          onClick={() => setDrawingMode("circle")}
-        >
-          ⚪ Circle
-        </button>
-        <button
-          className="bg-pink-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
-          onClick={() => setDrawingMode("select")}
-        >
-          🖱️ Select
-        </button>
+        <button className="bg-blue-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("draw")}>✏️ Draw</button>
+        <button className="bg-green-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("rect")}>⬛ Rectangle</button>
+        <button className="bg-red-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("circle")}>⚪ Circle</button>
+        <button className="bg-pink-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("select")}>🖱️ Select</button>
       </div>
 
-      <div className="shadow-2xl hover:shadow-blue-400 bg-black rounded-xl">
+      <div className="shadow-2xl bg-black rounded-xl">
         <canvas ref={canvasRef} width={800} height={500} />
       </div>
     </div>
