@@ -3,17 +3,22 @@ import React, { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import * as fabric from "fabric";
 
-const socket = io("http://localhost:5000"); // your backend address
+const socket = io("http://localhost:5000");
 
 const WhiteboardWithShapes: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvas = useRef<fabric.Canvas | null>(null);
+  const cursorLayer = useRef<HTMLDivElement | null>(null);
+
   const modeRef = useRef<"draw" | "rect" | "circle" | "select">("draw");
-  const [mode, setMode] = useState<"draw" | "rect" | "circle" | "select">("draw");
+  const [mode, setMode] = useState<"draw" | "rect" | "circle" | "select">(
+    "draw"
+  );
 
   useEffect(() => {
     if (!canvasRef.current) return;
 
+    // ---------------- FABRIC CANVAS INIT ----------------
     const canvas = new fabric.Canvas(canvasRef.current, {
       backgroundColor: "black",
       isDrawingMode: true,
@@ -21,6 +26,7 @@ const WhiteboardWithShapes: React.FC = () => {
     });
     fabricCanvas.current = canvas;
 
+    // Pencil brush
     const brush = new fabric.PencilBrush(canvas);
     brush.width = 3;
     brush.color = "white";
@@ -29,13 +35,16 @@ const WhiteboardWithShapes: React.FC = () => {
     let isDrawing = false;
     let shape: fabric.Rect | fabric.Circle | null = null;
 
-    // --- Socket: Listen for remote updates ---
+    // ---------------- REAL-TIME CANVAS LISTENER ----------------
     socket.on("canvas:update", (data: string) => {
       if (!fabricCanvas.current) return;
-      fabricCanvas.current.loadFromJSON(data, fabricCanvas.current.renderAll.bind(fabricCanvas.current));
+      fabricCanvas.current.loadFromJSON(
+        data,
+        fabricCanvas.current.renderAll.bind(fabricCanvas.current)
+      );
     });
 
-    // --- Local drawing logic ---
+    // ---------------- SHAPE + DRAW LOGIC ----------------
     const onMouseDown = (event: fabric.TPointerEventInfo) => {
       const currentMode = modeRef.current;
       const pointer = canvas.getPointer(event.e);
@@ -79,8 +88,17 @@ const WhiteboardWithShapes: React.FC = () => {
     };
 
     const onMouseMove = (event: fabric.TPointerEventInfo) => {
-      if (!isDrawing || !shape) return;
       const pointer = canvas.getPointer(event.e);
+
+      // ----- EMIT CURSOR POSITION -----
+      socket.emit("cursor:move", {
+        id: socket.id,
+        x: pointer.x,
+        y: pointer.y,
+      });
+
+      // --- Shape resizing ---
+      if (!isDrawing || !shape) return;
 
       if (shape instanceof fabric.Rect) {
         shape.set({
@@ -90,10 +108,11 @@ const WhiteboardWithShapes: React.FC = () => {
       } else if (shape instanceof fabric.Circle) {
         const radius = Math.sqrt(
           Math.pow(pointer.x - (shape.left ?? 0), 2) +
-            Math.pow(pointer.y - (shape.top ?? 0), 2)
+          Math.pow(pointer.y - (shape.top ?? 0), 2)
         );
         shape.set({ radius });
       }
+
       canvas.renderAll();
     };
 
@@ -101,17 +120,14 @@ const WhiteboardWithShapes: React.FC = () => {
       isDrawing = false;
       shape = null;
 
-      // 🔥 Send current canvas state to all
-      const json = JSON.stringify(canvas.toJSON());
-      socket.emit("canvas:update", json);
+      socket.emit("canvas:update", JSON.stringify(canvas.toJSON()));
     };
 
     const onObjectModified = () => {
-      const json = JSON.stringify(canvas.toJSON());
-      socket.emit("canvas:update", json);
+      socket.emit("canvas:update", JSON.stringify(canvas.toJSON()));
     };
 
-    // --- Delete key feature ---
+    // ---------------- DELETE OBJECT ----------------
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Delete" || e.key === "Backspace") {
         const activeObj = canvas.getActiveObject();
@@ -122,25 +138,59 @@ const WhiteboardWithShapes: React.FC = () => {
       }
     };
 
-    // Attach
+    // ---------------- ATTACH EVENTS ----------------
     canvas.on("mouse:down", onMouseDown);
     canvas.on("mouse:move", onMouseMove);
     canvas.on("mouse:up", onMouseUp);
     canvas.on("object:modified", onObjectModified);
+
     window.addEventListener("keydown", handleKeyDown);
 
+    // ---------------- REAL-TIME CURSOR RENDER LOGIC ----------------
+    const cursors: Record<string, HTMLDivElement> = {};
+
+    socket.on("cursor:move", ({ id, x, y }) => {
+      if (!cursorLayer.current) return;
+
+      if (!cursors[id]) {
+        const el = document.createElement("div");
+        el.style.position = "absolute";
+        el.style.width = "10px";
+        el.style.height = "10px";
+        el.style.borderRadius = "50%";
+        el.style.background = "#00eaff";
+        el.style.boxShadow = "0 0 10px #00eaff";
+        el.style.pointerEvents = "none";
+        cursorLayer.current.appendChild(el);
+        cursors[id] = el;
+      }
+
+      cursors[id].style.transform = `translate(${x}px, ${y}px)`;
+    });
+
+    socket.on("user:disconnect", (id) => {
+      if (cursors[id]) {
+        cursors[id].remove();
+        delete cursors[id];
+      }
+    });
+
+    // ---------------- CLEANUP ----------------
     return () => {
       socket.off("canvas:update");
+      socket.off("cursor:move");
+      socket.off("user:disconnect");
       canvas.dispose();
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
 
-  // --- Mode update ---
+  // ---------------- MODE SWITCHING ----------------
   useEffect(() => {
     modeRef.current = mode;
     const canvas = fabricCanvas.current;
     if (!canvas) return;
+
     canvas.isDrawingMode = mode === "draw";
     canvas.selection = mode === "select";
   }, [mode]);
@@ -150,14 +200,41 @@ const WhiteboardWithShapes: React.FC = () => {
   return (
     <div className="bg-gradient-to-b from-black via-[#020617] to-[#0f172a] min-h-screen flex flex-col items-center justify-center">
       <div className="mb-4">
-        <button className="bg-blue-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("draw")}>✏️ Draw</button>
-        <button className="bg-green-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("rect")}>⬛ Rectangle</button>
-        <button className="bg-red-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("circle")}>⚪ Circle</button>
-        <button className="bg-pink-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl" onClick={() => setDrawingMode("select")}>🖱️ Select</button>
+        <button
+          className="bg-blue-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
+          onClick={() => setDrawingMode("draw")}
+        >
+          ✏️ Draw
+        </button>
+        <button
+          className="bg-green-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
+          onClick={() => setDrawingMode("rect")}
+        >
+          ⬛ Rectangle
+        </button>
+        <button
+          className="bg-red-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
+          onClick={() => setDrawingMode("circle")}
+        >
+          ⚪ Circle
+        </button>
+        <button
+          className="bg-pink-500 text-white rounded-2xl mr-2 px-4 py-2 shadow-2xl"
+          onClick={() => setDrawingMode("select")}
+        >
+          🖱️ Select
+        </button>
       </div>
 
-      <div className="shadow-2xl bg-black rounded-xl">
+      {/* Canvas Container */}
+      <div className="relative shadow-2xl bg-black rounded-xl">
         <canvas ref={canvasRef} width={800} height={500} />
+
+        {/* Cursor Overlay */}
+        <div
+          ref={cursorLayer}
+          className="absolute inset-0 pointer-events-none"
+        />
       </div>
     </div>
   );
