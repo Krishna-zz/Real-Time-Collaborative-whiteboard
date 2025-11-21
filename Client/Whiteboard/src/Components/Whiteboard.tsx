@@ -17,37 +17,40 @@ const WhiteboardWithShapes: React.FC = () => {
 
   // transient drawing state
   const localStrokeId = useRef<string | null>(null);
+  const localStrokeObj = useRef<fabric.Polyline | null>(null);
   const localStrokePoints = useRef<Array<{ x: number; y: number }>>([]);
   const drawingShapeId = useRef<string | null>(null);
+  const localShapeObj = useRef<fabric.Rect | fabric.Circle | null>(null);
 
   useEffect(() => {
     if (!canvasRef.current) return;
 
     const canvas = new fabric.Canvas(canvasRef.current, {
       backgroundColor: "black",
-      isDrawingMode: true,
+      isDrawingMode: false, // we draw manually
       selection: false,
     });
     fabricCanvas.current = canvas;
 
-    // pencil brush settings
-    const brush = new fabric.PencilBrush(canvas);
-    brush.width = 3;
-    brush.color = "white";
-    canvas.freeDrawingBrush = brush;
+    // brush defaults
+    const defaultStroke = {
+      color: "white",
+      width: 3,
+      lineCap: "round" as CanvasLineCap,
+      lineJoin: "round" as CanvasLineJoin,
+    };
 
-    // Map to keep remote objects (shapes/strokes) by id
+    // maps
     const remoteObjects: Record<string, fabric.Object> = {};
     const remoteStrokes: Record<string, fabric.Polyline> = {};
+    const tempSegmentGroups: Record<string, fabric.Group | fabric.Object[]> = {};
     const cursors: Record<string, HTMLDivElement> = {};
 
-    // Assign custom ids to locally created objects (so they can be synced later)
-    function assignId(obj: fabric.Object, id: string) {
-      // @ts-ignore
-      obj.customId = id;
-    }
+    const assignId = (obj: fabric.Object, id: string) => {
+      (obj as any).customId = id;
+    };
 
-    // ---------------------- CURSOR ----------------------
+    // ---------- Cursor ----------
     socket.on("cursor:update", ({ socketId, x, y, color }) => {
       if (!cursorLayer.current) return;
       if (!cursors[socketId]) {
@@ -66,7 +69,6 @@ const WhiteboardWithShapes: React.FC = () => {
       cursors[socketId].style.left = `${x}px`;
       cursors[socketId].style.top = `${y}px`;
     });
-
     socket.on("cursor:remove", (id: string) => {
       if (cursors[id]) {
         cursors[id].remove();
@@ -74,92 +76,125 @@ const WhiteboardWithShapes: React.FC = () => {
       }
     });
 
-    // receive remote stroke events
-    socket.on("stroke:start", ({ strokeId, color, width, start }) => {
-      // create polyline on remote side
-      const poly = new fabric.Polyline([start], {
-        stroke: color || "white",
-        strokeWidth: width || 3,
-        fill: "",
-        selectable: false,
-        evented: false,
-      });
-      remoteStrokes[strokeId] = poly;
-      canvas.add(poly);
+    // ---------- Remote live stroke handling ----------
+    socket.on("draw-live", (payload: { strokeId: string; point: { x: number; y: number }; color: string; width: number }) => {
+      const { strokeId, point, color, width } = payload;
+      // create remote polyline if missing
+      let poly = remoteStrokes[strokeId];
+      if (!poly) {
+        poly = new fabric.Polyline([point], {
+          stroke: color || defaultStroke.color,
+          strokeWidth: width || defaultStroke.width,
+          fill: "",
+          selectable: false,
+          evented: false,
+          strokeLineCap: defaultStroke.lineCap,
+          strokeLineJoin: defaultStroke.lineJoin,
+          strokeUniform: true,
+        });
+        remoteStrokes[strokeId] = poly;
+        canvas.add(poly);
+      } else {
+        const pts: any[] = (poly as any).points ? (poly as any).points : [];
+        pts.push(point);
+        poly.set({ points: pts });
+      }
+      try { (poly as any).setCoords(); } catch {}
+      canvas.requestRenderAll();
     });
 
-    socket.on("stroke:move", ({ strokeId, point }) => {
-      const poly = remoteStrokes[strokeId];
-      if (!poly) return;
-      // @ts-ignore fabric Polyline points are an array of {x,y}
-      const pts = poly.points ? (poly.points as any[]) : [];
-      pts.push(point);
-      poly.set({ points: pts });
-      // calcOffset isn't declared on the Polyline type in the TS defs, cast to any to call it safely
-      poly.pathOffset = (poly as any).calcOffset?.();
-      canvas.renderAll();
+    // finalization of remote stroke: replace polyline with final path
+    socket.on("draw-final", (payload: { strokeId: string; path: any; color: string; width: number }) => {
+      const { strokeId, path, color, width } = payload;
+      // remove any live polyline
+      const live = remoteStrokes[strokeId];
+      if (live) {
+        canvas.remove(live);
+        delete remoteStrokes[strokeId];
+      }
+      // create final path (fabric.Path expects svg path data or path array)
+      // Received `path` is expected to be a path.toObject() compatible object.
+      // We'll use Fabric.Path with the path data if present, else fallback to Polyline.
+      try {
+        // If payload.path.path exists (fabric path object), use it
+        const pathData = (path && (path.path || path.commands || path)) as any;
+        const final = new fabric.Path(pathData, {
+          stroke: color || defaultStroke.color,
+          strokeWidth: width || defaultStroke.width,
+          fill: "",
+          selectable: true,
+          evented: true,
+          strokeLineCap: defaultStroke.lineCap,
+          strokeLineJoin: defaultStroke.lineJoin,
+          strokeUniform: true,
+        });
+        assignId(final, strokeId);
+        canvas.add(final);
+        final.setCoords();
+      } catch (err) {
+        // fallback: create polyline from path points if shape
+        if (Array.isArray((path && path.points) || [])) {
+          const pts = (path.points || []);
+          const poly = new fabric.Polyline(pts as any, {
+            stroke: color || defaultStroke.color,
+            strokeWidth: width || defaultStroke.width,
+            fill: "",
+            selectable: true,
+            evented: true,
+            strokeLineCap: defaultStroke.lineCap,
+            strokeLineJoin: defaultStroke.lineJoin,
+            strokeUniform: true,
+          });
+          assignId(poly, strokeId);
+          canvas.add(poly);
+          poly.setCoords();
+        }
+      }
+      canvas.requestRenderAll();
     });
 
-    socket.on("stroke:end", ({ strokeId }) => {
-      const poly = remoteStrokes[strokeId];
-      if (!poly) return;
-      // make it selectable so other clients can move/delete it later
-      poly.set({ selectable: true, evented: true });
-      // assign id
-      assignId(poly, strokeId);
-      remoteObjects[strokeId] = poly;
-    });
-
-    // receive shape events
+    // ---------- Shapes + object events (unchanged) ----------
     socket.on("shape:start", ({ shapeId, type, left, top, style }) => {
       let obj: fabric.Object;
       if (type === "rect") {
         obj = new fabric.Rect({
-          left,
-          top,
-          width: 0,
-          height: 0,
-          selectable: true,
-          ...style,
+          left, top, width: 0, height: 0, selectable: true, ...style
         });
       } else {
-        // circle
         obj = new fabric.Circle({
-          left,
-          top,
-          radius: 0,
-          selectable: true,
-          ...style,
+          left, top, radius: 0, selectable: true, ...style
         });
       }
       assignId(obj, shapeId);
       remoteObjects[shapeId] = obj;
       canvas.add(obj);
+      try { obj.setCoords(); } catch {}
+      canvas.requestRenderAll();
     });
 
     socket.on("shape:update", ({ shapeId, props }) => {
       const obj = remoteObjects[shapeId];
       if (!obj) return;
       obj.set(props);
-      canvas.renderAll();
+      try { obj.setCoords(); } catch {}
+      canvas.requestRenderAll();
     });
 
     socket.on("shape:end", ({ shapeId, props }) => {
       const obj = remoteObjects[shapeId];
       if (!obj) return;
       obj.set(props);
-      // ensure object has id/can be modified later
       assignId(obj, shapeId);
-      canvas.renderAll();
+      try { obj.setCoords(); } catch {}
+      canvas.requestRenderAll();
     });
 
-    // object modification and deletion sync
     socket.on("object:modified", ({ id, props }) => {
-      // find object by custom id
       const found = canvas.getObjects().find((o) => (o as any).customId === id);
       if (found) {
         found.set(props);
-        canvas.renderAll();
+        try { (found as any).setCoords(); } catch {}
+        canvas.requestRenderAll();
       }
     });
 
@@ -167,144 +202,122 @@ const WhiteboardWithShapes: React.FC = () => {
       const found = canvas.getObjects().find((o) => (o as any).customId === id);
       if (found) {
         canvas.remove(found);
-        canvas.renderAll();
+        canvas.requestRenderAll();
       }
     });
 
-    // ---------------------- LOCAL DRAW + SHAPE LOGIC ----------------------
-
-    // helper to emit cursor coords (send pointer relative to canvas)
+    // ---------- Local input handling (live segments + finalization) ----------
     const emitCursor = (pointer: { x: number; y: number }) => {
-      socket.emit("cursor:move", {
-        x: pointer.x,
-        y: pointer.y,
-      });
+      socket.emit("cursor:move", { x: pointer.x, y: pointer.y });
     };
 
-    // mouse events for pencil/shapes
     let isDrawing = false;
-    let currentLocalShape: fabric.Rect | fabric.Circle | null = null;
+    let lastPoint: { x: number; y: number } | null = null;
+
+    // Helper to build a unique stroke id
+    const makeStrokeId = () => `${socket.id}_${Date.now()}`;
 
     canvas.on("mouse:down", (e) => {
-      const pointer = canvas.getPointer((e as any).e);
-      emitCursor(pointer);
+      const p = canvas.getPointer((e as any).e);
+      emitCursor(p);
 
       const currentMode = modeRef.current;
-
       if (currentMode === "draw") {
         isDrawing = true;
-        // new local stroke id
-        const strokeId = `${socket.id}_${Date.now()}`;
+        lastPoint = { x: p.x, y: p.y };
+        const strokeId = makeStrokeId();
         localStrokeId.current = strokeId;
-        localStrokePoints.current = [{ x: pointer.x, y: pointer.y }];
+        localStrokePoints.current = [{ x: p.x, y: p.y }];
 
-        socket.emit("stroke:start", {
-          strokeId,
-          color: (canvas.freeDrawingBrush as any).color,
-          width: (canvas.freeDrawingBrush as any).width,
-          start: { x: pointer.x, y: pointer.y },
+        // create local polyline for live preview
+        const poly = new fabric.Polyline([{ x: p.x, y: p.y }], {
+          stroke: defaultStroke.color,
+          strokeWidth: defaultStroke.width,
+          fill: "",
+          selectable: false,
+          evented: false,
+          strokeLineCap: defaultStroke.lineCap,
+          strokeLineJoin: defaultStroke.lineJoin,
+          strokeUniform: true,
         });
-        // the local drawing itself is handled by fabric's free drawing
+        localStrokeObj.current = poly;
+        assignId(poly, strokeId);
+        canvas.add(poly);
+        try { poly.setCoords(); } catch {}
+        canvas.requestRenderAll();
+
+        // emit first live point (start)
+        socket.emit("draw-live", { strokeId, point: { x: p.x, y: p.y }, color: defaultStroke.color, width: defaultStroke.width });
       } else if (currentMode === "rect" || currentMode === "circle") {
         isDrawing = true;
         const shapeId = `${socket.id}_${Date.now()}`;
         drawingShapeId.current = shapeId;
 
         if (currentMode === "rect") {
-          currentLocalShape = new fabric.Rect({
-            left: pointer.x,
-            top: pointer.y,
-            width: 0,
-            height: 0,
-            fill: "rgba(248, 231, 3, 0.9)",
-            stroke: "yellow",
-            strokeWidth: 2,
-            shadow: new fabric.Shadow({
-              color: "rgba(235,29,22,0.77)",
-              blur: 11,
-              offsetX: 7,
-              offsetY: 7,
-            }),
-            selectable: true,
+          localShapeObj.current = new fabric.Rect({
+            left: p.x, top: p.y, width: 0, height: 0,
+            fill: "rgba(248, 231, 3, 0.9)", stroke: "yellow", strokeWidth: 2,
+            shadow: new fabric.Shadow({ color: "rgba(235,29,22,0.77)", blur: 11, offsetX: 7, offsetY: 7 }),
+            selectable: true
           });
         } else {
-          currentLocalShape = new fabric.Circle({
-            left: pointer.x,
-            top: pointer.y,
-            radius: 0,
-            fill: "rgba(245,29,22,0.15)",
-            stroke: "orange",
-            strokeWidth: 2,
-            shadow: new fabric.Shadow({
-              color: "rgba(235,29,22,0.77)",
-              blur: 17,
-              offsetX: 15,
-              offsetY: 15,
-            }),
-            selectable: true,
+          localShapeObj.current = new fabric.Circle({
+            left: p.x, top: p.y, radius: 0,
+            fill: "rgba(245,29,22,0.15)", stroke: "orange", strokeWidth: 2,
+            shadow: new fabric.Shadow({ color: "rgba(235,29,22,0.77)", blur: 17, offsetX: 15, offsetY: 15 }),
+            selectable: true
           });
         }
 
-        // add locally
-        canvas.add(currentLocalShape);
-        assignId(currentLocalShape, shapeId);
+        canvas.add(localShapeObj.current);
+        assignId(localShapeObj.current, shapeId);
+        try { localShapeObj.current.setCoords(); } catch {}
+        canvas.requestRenderAll();
 
-        // notify others
-        socket.emit("shape:start", {
-          shapeId,
-          type: currentMode,
-          left: pointer.x,
-          top: pointer.y,
-          style: {}, // we used same style on remote code; kept empty to avoid huge payload
-        });
-      } else {
-        // select mode - nothing special
+        socket.emit("shape:start", { shapeId, type: currentMode, left: p.x, top: p.y, style: {} });
       }
     });
 
     canvas.on("mouse:move", (e) => {
-      const pointer = canvas.getPointer((e as any).e);
-      emitCursor(pointer);
+      const p = canvas.getPointer((e as any).e);
+      emitCursor(p);
 
       if (!isDrawing) return;
       const currentMode = modeRef.current;
 
-      if (currentMode === "draw" && localStrokeId.current) {
-        // collect point and emit
-        const point = { x: pointer.x, y: pointer.y };
-        localStrokePoints.current.push(point);
-        socket.emit("stroke:move", {
-          strokeId: localStrokeId.current,
-          point,
-        });
-        // local drawing is handled by fabric free drawing brush
-      } else if ((currentMode === "rect" || currentMode === "circle") && currentLocalShape) {
-        // update local shape and emit update
-        if (currentLocalShape instanceof fabric.Rect) {
-          const left = currentLocalShape.left ?? 0;
-          const top = currentLocalShape.top ?? 0;
-          currentLocalShape.set({
-            width: pointer.x - left,
-            height: pointer.y - top,
-          });
-          socket.emit("shape:update", {
-            shapeId: drawingShapeId.current,
-            props: {
-              width: pointer.x - left,
-              height: pointer.y - top,
-            },
-          });
-        } else if (currentLocalShape instanceof fabric.Circle) {
-          const cx = currentLocalShape.left ?? 0;
-          const cy = currentLocalShape.top ?? 0;
-          const r = Math.sqrt(Math.pow(pointer.x - cx, 2) + Math.pow(pointer.y - cy, 2));
-          currentLocalShape.set({ radius: r });
-          socket.emit("shape:update", {
-            shapeId: drawingShapeId.current,
-            props: { radius: r },
-          });
+      if (currentMode === "draw" && localStrokeObj.current && localStrokeId.current) {
+        // append to local polyline
+        const poly = localStrokeObj.current;
+        const pts: any[] = (poly as any).points ? (poly as any).points : [];
+        pts.push({ x: p.x, y: p.y });
+        poly.set({ points: pts });
+        try { poly.setCoords(); } catch {}
+        canvas.requestRenderAll();
+
+        // add to local points list
+        localStrokePoints.current.push({ x: p.x, y: p.y });
+
+        // emit live single point (fast)
+        socket.emit("draw-live", { strokeId: localStrokeId.current, point: { x: p.x, y: p.y }, color: defaultStroke.color, width: defaultStroke.width });
+
+        lastPoint = { x: p.x, y: p.y };
+      } else if ((currentMode === "rect" || currentMode === "circle") && localShapeObj.current && drawingShapeId.current) {
+        const obj = localShapeObj.current;
+        if (obj instanceof fabric.Rect) {
+          const left = obj.left ?? 0;
+          const top = obj.top ?? 0;
+          obj.set({ width: p.x - left, height: p.y - top });
+          try { obj.setCoords(); } catch {}
+          socket.emit("shape:update", { shapeId: drawingShapeId.current, props: { width: p.x - left, height: p.y - top } });
+        } else if (obj instanceof fabric.Circle) {
+          const cx = obj.left ?? 0;
+          const cy = obj.top ?? 0;
+          const r = Math.sqrt(Math.pow(p.x - cx, 2) + Math.pow(p.y - cy, 2));
+          obj.set({ radius: r });
+          try { obj.setCoords(); } catch {}
+          socket.emit("shape:update", { shapeId: drawingShapeId.current, props: { radius: r } });
         }
-        canvas.renderAll();
+        canvas.requestRenderAll();
       }
     });
 
@@ -312,68 +325,70 @@ const WhiteboardWithShapes: React.FC = () => {
       const currentMode = modeRef.current;
 
       if (currentMode === "draw" && localStrokeId.current) {
-        socket.emit("stroke:end", { strokeId: localStrokeId.current });
+        // finalize: emit final path data to remotes
+        const pts = localStrokePoints.current.slice();
+        // create SVG path string from points for smaller payload & proper rendering
+        let svgPath = "";
+        if (pts.length > 0) {
+          svgPath = `M ${pts[0].x} ${pts[0].y}`;
+          for (let i = 1; i < pts.length; i++) {
+            svgPath += ` L ${pts[i].x} ${pts[i].y}`;
+          }
+        }
+        socket.emit("draw-final", { strokeId: localStrokeId.current, path: svgPath, color: defaultStroke.color, width: defaultStroke.width });
+
+        // make local stroke selectable
+        if (localStrokeObj.current) {
+          localStrokeObj.current.set({ selectable: true, evented: true });
+          try { localStrokeObj.current.setCoords(); } catch {}
+        }
+
+        // cleanup local buffers
         localStrokeId.current = null;
+        localStrokeObj.current = null;
         localStrokePoints.current = [];
       } else if ((currentMode === "rect" || currentMode === "circle") && drawingShapeId.current) {
-        // finalize shape
-        const obj = canvas.getObjects().find((o) => (o as any).customId === drawingShapeId.current);
+        const obj = fabricCanvas.current?.getObjects().find((o) => (o as any).customId === drawingShapeId.current);
         if (obj) {
-          socket.emit("shape:end", {
-            shapeId: drawingShapeId.current,
-            props: { left: (obj.left ?? 0), top: (obj.top ?? 0), ...(obj as any).toObject ? (obj as any).toObject() : {} },
-          });
+          socket.emit("shape:end", { shapeId: drawingShapeId.current, props: { left: obj.left ?? 0, top: obj.top ?? 0, ...(obj as any).toObject ? (obj as any).toObject() : {} } });
         }
         drawingShapeId.current = null;
-        currentLocalShape = null;
+        localShapeObj.current = null;
       }
+
       isDrawing = false;
+      lastPoint = null;
     });
 
-    // When local objects are modified (moved/rotated/scaled)
+    // object modification
     canvas.on("object:modified", (e) => {
       const obj = e.target;
       if (!obj) return;
       const id = (obj as any).customId;
-      if (!id) return; // only sync objects we assigned ids to
-      // send minimal transform
-      socket.emit("object:modified", {
-        id,
-        props: {
-          left: obj.left,
-          top: obj.top,
-          scaleX: obj.scaleX,
-          scaleY: obj.scaleY,
-          angle: obj.angle,
-        },
-      });
+      if (!id) return;
+      socket.emit("object:modified", { id, props: { left: obj.left, top: obj.top, scaleX: obj.scaleX, scaleY: obj.scaleY, angle: obj.angle } });
     });
 
-    // Delete key
+    // delete
     const handleKeyDown = (ev: KeyboardEvent) => {
       if (ev.key === "Delete" || ev.key === "Backspace") {
         const active = canvas.getActiveObject();
         if (active) {
           const id = (active as any).customId;
-          if (id) {
-            socket.emit("object:removed", { id });
-          }
+          if (id) socket.emit("object:removed", { id });
           canvas.remove(active);
+          canvas.requestRenderAll();
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
 
-    // Keep canvas freeDrawingMode toggled by mode changes elsewhere (effect below will handle but ensure initial)
-    canvas.isDrawingMode = modeRef.current === "draw";
-
-    // Clean up on unmount
+    // cleanup
     return () => {
       socket.off("cursor:update");
       socket.off("cursor:remove");
-      socket.off("stroke:start");
-      socket.off("stroke:move");
-      socket.off("stroke:end");
+      socket.off("draw-live");
+      socket.off("draw-final");
       socket.off("shape:start");
       socket.off("shape:update");
       socket.off("shape:end");
@@ -389,7 +404,7 @@ const WhiteboardWithShapes: React.FC = () => {
     modeRef.current = mode;
     const canvas = fabricCanvas.current;
     if (!canvas) return;
-    canvas.isDrawingMode = mode === "draw";
+    canvas.isDrawingMode = false; // always manual
     canvas.selection = mode === "select";
   }, [mode]);
 

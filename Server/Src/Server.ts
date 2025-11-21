@@ -16,60 +16,61 @@ const io = new Server(server, {
   }
 });
 
-// optional: assign colors for cursors
+// Optional color assignment for cursors
 const userColors: Record<string, string> = {};
 const COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7ff", "#007aff", "#5856d6", "#af52de"];
+
 function pickColor(id: string) {
-  const i = Math.abs(Array.from(id).reduce((s, c) => s + c.charCodeAt(0), 0)) % COLORS.length;
-  return COLORS[i];
+  const sum = Array.from(id).reduce((s, c) => s + c.charCodeAt(0), 0);
+  return COLORS[Math.abs(sum) % COLORS.length];
 }
 
 io.on("connection", (socket) => {
   console.log("🟢 User connected:", socket.id);
-  userColors[socket.id] = pickColor(socket.id);
-  // inform user of assigned color if they want it
-  socket.emit("cursor:assignColor", userColors[socket.id]);
 
-  // cursor movement -> broadcast to others
-  socket.on("cursor:move", (pos) => {
+  // Assign random color for the cursor
+  const color = pickColor(socket.id);
+  userColors[socket.id] = color;
+  socket.emit("cursor:assignColor", color);
+
+  // ---------------------------
+  // REAL-TIME CURSOR UPDATES
+  // ---------------------------
+  socket.on("cursor:update", (pos) => {
     socket.broadcast.emit("cursor:update", {
       socketId: socket.id,
       x: pos.x,
       y: pos.y,
-      color: userColors[socket.id],
+      color: color,
     });
   });
 
-  socket.on("stroke:start", (payload) => {
-    // broadcast to others: start a new stroke
-    socket.broadcast.emit("stroke:start", payload);
-  });
-  socket.on("stroke:move", (payload) => {
-    socket.broadcast.emit("stroke:move", payload);
-  });
-  socket.on("stroke:end", (payload) => {
-    socket.broadcast.emit("stroke:end", payload);
+  // ---------------------------------
+  // REAL-TIME STREAMING DRAWING
+  // ---------------------------------
+
+  // Starting a stroke
+  socket.on("stroke:start", (data) => {
+    socket.broadcast.emit("stroke:start", {
+      ...data,
+      color: data.color,
+      width: data.width,
+    });
   });
 
-  // shape lifecycle
-  socket.on("shape:start", (payload) => {
-    socket.broadcast.emit("shape:start", payload);
-  });
-  socket.on("shape:update", (payload) => {
-    socket.broadcast.emit("shape:update", payload);
-  });
-  socket.on("shape:end", (payload) => {
-    socket.broadcast.emit("shape:end", payload);
+  // Moving pencil (live line segments)
+  socket.on("stroke:move", (data) => {
+    socket.broadcast.emit("stroke:move", data);
   });
 
-  // object modifications/deletes
-  socket.on("object:modified", (payload) => {
-    socket.broadcast.emit("object:modified", payload);
-  });
-  socket.on("object:removed", (payload) => {
-    socket.broadcast.emit("object:removed", payload);
+  // Stroke finished
+  socket.on("stroke:end", (data) => {
+    socket.broadcast.emit("stroke:end", data);
   });
 
+  // ---------------------------
+  // DISCONNECT
+  // ---------------------------
   socket.on("disconnect", () => {
     console.log("🔴 User disconnected:", socket.id);
     delete userColors[socket.id];
@@ -77,5 +78,8 @@ io.on("connection", (socket) => {
   });
 });
 
+// -----------------------------------
 const PORT = 5000;
-server.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+server.listen(PORT, () =>
+  console.log(`✅ Server running on port ${PORT}`)
+);
